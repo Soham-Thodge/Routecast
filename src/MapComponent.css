@@ -1,0 +1,135 @@
+.weather-cards-container {
+  position: absolute;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.weather-cards-container > * {
+  pointer-events: auto;
+}
+
+/* Compact weather cards */
+.weather-card {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  width: 120px;
+  padding: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.weather-card:hover, .weather-card.expanded {
+  width: 240px;
+  transform: scale(1.05);
+}
+
+/* Minimized state */
+.weather-card:not(:hover):not(.expanded) .weather-details,
+.weather-card:not(:hover):not(.expanded) .condition-main {
+  display: none;
+}
+
+.weather-card:not(:hover):not(.expanded) .weather-title {
+  font-size: 12px;
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+}
+
+.weather-card:not(:hover):not(.expanded) .temp-large {
+  font-size: 18px;
+}
+
+/* Expanded state */
+.weather-title {
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.temp-large {
+  font-size: 24px;
+  font-weight: 600;
+  color: #2563eb;
+}
+
+.condition-main {
+  color: #4b5563;
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+.weather-details {
+  margin-top: 8px;
+  padding: 8px;
+  background: #f8fafc;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* Cities along route */
+.route-city-marker {
+  width: 12px;
+  height: 12px;
+  background: #2563eb;
+  border: 2px solid white;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.2s ease;
+}
+
+.route-city-marker:hover {
+  transform: scale(1.2);
+}
+
+.city-popup {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  max-width: 200px;
+}
+
+.city-popup .city-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 8px;
+}
+
+.city-popup .city-weather {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.city-popup .temp {
+  font-size: 18px;
+  font-weight: 500;
+  color: #2563eb;
+}
+
+.city-popup .condition {
+  font-size: 12px;
+  color: #4b5563;
+}
+
+/* Detail items in expanded state */
+.detail-item {
+  display: flex;
+  justify-content: space-between;
+  margin: 4px 0;
+  font-size: 12px;
+}
+
+.detail-label {
+  color: #64748b;
+}
+
+.detail-value {
+  color: #1e293b;
+  font-weight: 500;
+}
