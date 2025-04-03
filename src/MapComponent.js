@@ -5,7 +5,7 @@ import axios from 'axios';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import '@mapbox/mapbox-gl-directions/dist/mapbox-gl-directions.css';
 import './MapComponent.css';
-import { FaHospital, FaFireExtinguisher, FaShieldAlt, FaHotel } from 'react-icons/fa';
+import { FaHospital, FaFireExtinguisher, FaShieldAlt, FaHotel, FaCamera, FaRoad } from 'react-icons/fa';
 import polyline from '@mapbox/polyline';
 
 mapboxgl.accessToken = 'pk.eyJ1Ijoic29oYW0tdGhvZGdlIiwiYSI6ImNtMm5pc3F6dzA3YmQyanNiMWg0MXRteXgifQ.PD3_74PC5fHiJ2esK0w3DQ';
@@ -144,6 +144,567 @@ const MapComponent = () => {
   const [showEmergencyRoutes, setShowEmergencyRoutes] = useState(false);
   const [activeEmergencyRoute, setActiveEmergencyRoute] = useState(null);
   const [trafficLayerVisible, setTrafficLayerVisible] = useState(true);
+  const [speedCameraMarkers, setSpeedCameraMarkers] = useState([]);
+  const [speedLimitMarkers, setSpeedLimitMarkers] = useState([]);
+  const [showSpeedCameras, setShowSpeedCameras] = useState(true);
+  const [showSpeedLimits, setShowSpeedLimits] = useState(true);
+
+  // Function to fetch speed camera data from OpenStreetMap
+  const fetchSpeedCameras = async (routeGeometry) => {
+    if (!mapRef.current || !routeGeometry) return;
+
+    // Clear existing speed camera markers
+    speedCameraMarkers.forEach(marker => marker.remove());
+    setSpeedCameraMarkers([]);
+
+    try {
+      // Decode polyline to get route coordinates
+      const decodedCoords = polyline.decode(routeGeometry);
+      const routeCoordinates = decodedCoords.map(coord => [coord[1], coord[0]]); // [lng, lat]
+
+      // Calculate bounding box for the route with a buffer
+      const lats = routeCoordinates.map(coord => coord[0]);
+      const lngs = routeCoordinates.map(coord => coord[1]);
+
+      const bufferDistance = 0.03; // ~3 km buffer
+      const bbox = [
+        Math.min(...lngs) - bufferDistance, // min longitude
+        Math.min(...lats) - bufferDistance, // min latitude
+        Math.max(...lngs) + bufferDistance, // max longitude
+        Math.max(...lats) + bufferDistance  // max latitude
+      ];
+
+      // Query for speed cameras using OpenStreetMap Overpass API
+      const overpassQuery = `
+        [out:json];
+        (
+          node["highway"="speed_camera"](${bbox});
+          node["amenity"="speed_camera"](${bbox});
+          node["enforcement"="speed"](${bbox});
+          way["highway"="speed_camera"](${bbox});
+          way["amenity"="speed_camera"](${bbox});
+          way["enforcement"="speed"](${bbox});
+        );
+        (._;>;);
+        out;
+      `;
+
+      const response = await axios.get(
+        `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(overpassQuery)}`
+      );
+
+      const newMarkers = [];
+
+      response.data.elements.forEach(element => {
+        let coords;
+        if (element.type === 'node') {
+          coords = [element.lon, element.lat];
+        } else if (element.center) {
+          coords = [element.center.lon, element.center.lat];
+        }
+
+        if (coords) {
+          // Calculate the distance to the nearest route point
+          const closestRoutePoint = getClosestRoutePoint(coords, routeCoordinates);
+          const distanceToRoute = calculateDistance(coords, closestRoutePoint);
+
+          // Only include cameras within 1 km of the route
+          if (distanceToRoute <= 1) {
+            // Create popup content
+            const maxSpeed = element.tags?.maxspeed || 'Unknown';
+            const direction = element.tags?.direction || 'Both';
+            
+            const popupContent = `
+              <div class="camera-popup">
+                <h4>Speed Camera</h4>
+                <p>Speed Limit: ${maxSpeed}</p>
+                <p>Direction: ${direction}</p>
+              </div>
+            `;
+
+            // Create a custom camera element
+            const el = document.createElement('div');
+            el.className = 'speed-camera-marker';
+            el.innerHTML = '<i class="fa fa-camera"></i>';
+            el.style.color = '#f00';
+            el.style.fontSize = '16px';
+
+            const marker = new mapboxgl.Marker({
+              element: el,
+              color: '#f03b20',
+              scale: 0.8
+            })
+              .setLngLat(coords)
+              .setPopup(new mapboxgl.Popup().setHTML(popupContent))
+              .addTo(mapRef.current);
+
+            newMarkers.push(marker);
+          }
+        }
+      });
+
+      setSpeedCameraMarkers(newMarkers);
+    } catch (error) {
+      console.error('Error fetching speed cameras:', error);
+    }
+  };
+
+  // Function to fetch speed limits from OpenStreetMap
+  const fetchSpeedLimits = async (routeGeometry) => {
+    if (!mapRef.current || !routeGeometry) return;
+
+    // Clear existing speed limit markers
+    speedLimitMarkers.forEach(marker => marker.remove());
+    setSpeedLimitMarkers([]);
+
+    try {
+      // Decode polyline to get route coordinates
+      const decodedCoords = polyline.decode(routeGeometry);
+      const routeCoordinates = decodedCoords.map(coord => [coord[1], coord[0]]);
+
+      // Sample points along the route (fewer points for better performance)
+      const sampledCoordinates = routeCoordinates.filter((_, index) => index % 15 === 0);
+      
+      // Create a new source for speed limit segments
+      if (mapRef.current.getSource('speed-limits')) {
+        mapRef.current.removeLayer('speed-limits-layer');
+        mapRef.current.removeSource('speed-limits');
+      }
+
+      // Query for speed limits using Overpass API
+      const overpassQueries = sampledCoordinates.map(coord => {
+        return axios.get(
+          `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(
+            `[out:json];
+            way(around:50,${coord[1]},${coord[0]})["highway"]["maxspeed"];
+            (._;>;);
+            out;`
+          )}`
+        );
+      });
+
+      const responses = await Promise.allSettled(overpassQueries);
+      const fulfilledResponses = responses.filter(r => r.status === 'fulfilled');
+      
+      const newMarkers = [];
+      const speedLimitSegments = [];
+      const processedCoords = new Set();
+
+      for (const response of fulfilledResponses) {
+        const data = response.value.data;
+        for (const element of data.elements) {
+          if (element.type === 'way' && element.tags && element.tags.maxspeed) {
+            const speedLimit = element.tags.maxspeed;
+            const wayNodes = element.nodes;
+            
+            if (wayNodes && wayNodes.length > 0) {
+              // Find the coordinates for the nodes of this way
+              const nodeElements = data.elements.filter(e => 
+                e.type === 'node' && wayNodes.includes(e.id)
+              );
+              
+              if (nodeElements.length > 0) {
+                // Use the middle node for the marker
+                const middleNode = nodeElements[Math.floor(nodeElements.length / 2)];
+                const coordKey = `${middleNode.lat},${middleNode.lon}`;
+                
+                if (!processedCoords.has(coordKey)) {
+                  processedCoords.add(coordKey);
+                  
+                  // Create a speed limit marker
+                  const el = document.createElement('div');
+                  el.className = 'speed-limit-marker';
+                  el.innerHTML = `<div class="speed-limit-sign">${speedLimit}</div>`;
+                  
+                  const marker = new mapboxgl.Marker({
+                    element: el,
+                  })
+                    .setLngLat([middleNode.lon, middleNode.lat])
+                    .setPopup(new mapboxgl.Popup().setHTML(
+                      `<div class="speed-popup"><h4>Speed Limit: ${speedLimit}</h4></div>`
+                    ))
+                    .addTo(mapRef.current);
+                  
+                  newMarkers.push(marker);
+                  
+                  // Create a speed limit segment for coloring
+                  if (nodeElements.length > 1) {
+                    const lineCoordinates = nodeElements.map(n => [n.lon, n.lat]);
+                    
+                    // Add color based on speed limit
+                    let color;
+                    const limit = parseInt(speedLimit);
+                    if (isNaN(limit)) {
+                      color = '#888888'; // grey for unknown
+                    } else if (limit <= 30) {
+                      color = '#4CAF50'; // green for slow
+                    } else if (limit <= 50) {
+                      color = '#FFA000'; // amber for medium
+                    } else if (limit <= 70) {
+                      color = '#FF5252'; // red for fast
+                    } else {
+                      color = '#9C27B0'; // purple for very fast
+                    }
+                    
+                    speedLimitSegments.push({
+                      type: 'Feature',
+                      properties: {
+                        speedLimit,
+                        color
+                      },
+                      geometry: {
+                        type: 'LineString',
+                        coordinates: lineCoordinates
+                      }
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      setSpeedLimitMarkers(newMarkers);
+      
+      // Add speed limit segments to the map
+      if (speedLimitSegments.length > 0) {
+        mapRef.current.addSource('speed-limits', {
+          type: 'geojson',
+          data: {
+            type: 'FeatureCollection',
+            features: speedLimitSegments
+          }
+        });
+        
+        mapRef.current.addLayer({
+          id: 'speed-limits-layer',
+          type: 'line',
+          source: 'speed-limits',
+          layout: {
+            'line-join': 'round',
+            'line-cap': 'round',
+            'visibility': showSpeedLimits ? 'visible' : 'none'
+          },
+          paint: {
+            'line-color': ['get', 'color'],
+            'line-width': 5,
+            'line-opacity': 0.7
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching speed limits:', error);
+    }
+  };
+
+  // Extend the handleRouteUpdate function to include speed cameras and limits
+  const handleRouteUpdate = async (event) => {
+    if (!directionsRef.current) return;
+
+    const origin = directionsRef.current.getOrigin();
+    const destination = directionsRef.current.getDestination();
+
+    setError(null);
+
+    if (!origin || !origin.geometry || !origin.geometry.coordinates) {
+      setError('Please enter a valid start location');
+      return;
+    }
+
+    if (!destination || !destination.geometry || !destination.geometry.coordinates) {
+      setError('Please enter a valid destination');
+      return;
+    }
+
+    // Store coordinates
+    setStartCoords(origin.geometry.coordinates);
+    setEndCoords(destination.geometry.coordinates);
+
+    // Update weather for start and end points
+    const startWeatherData = await fetchWeatherData(
+      origin.geometry.coordinates[1],
+      origin.geometry.coordinates[0]
+    );
+    setStartWeather(startWeatherData);
+
+    const endWeatherData = await fetchWeatherData(
+      destination.geometry.coordinates[1],
+      destination.geometry.coordinates[0]
+    );
+    setEndWeather(endWeatherData);
+
+    // Get route data from the event
+    if (event && event.route && event.route[0]) {
+      const steps = event.route[0].legs[0].steps;
+      const sampledPoints = steps.filter((_, index) => index % 5 === 0);
+      const routeGeometry = event.route[0].geometry;
+      
+      // Fetch emergency services, speed cameras, and speed limits
+      fetchEmergencyServices(routeGeometry);
+      fetchSpeedCameras(routeGeometry);
+      fetchSpeedLimits(routeGeometry);
+
+      const cities = await Promise.all(
+        sampledPoints.map(async (step) => {
+          const [lng, lat] = step.maneuver.location;
+          const cityName = await fetchCityName(lat, lng);
+          const weather = await fetchWeatherData(lat, lng);
+          return {
+            cityName,
+            weather,
+            coordinates: [lng, lat]
+          };
+        })
+      );
+
+      const uniqueCities = cities.filter((city, index, self) =>
+        index === self.findIndex((c) => c.cityName === city.cityName)
+      );
+      setRouteCities(uniqueCities);
+
+      // Collect weather data for analysis
+      const weatherPoints = await Promise.all(
+        sampledPoints.map(step => {
+          const [lng, lat] = step.maneuver.location;
+          return fetchWeatherData(lat, lng);
+        })
+      );
+
+      // Generate route recommendation using only weather data
+      const recommendation = analyzeRouteConditions(weatherPoints);
+      setRouteRecommendation(recommendation);
+    }
+  };
+
+  // Toggle functions for speed cameras and limits
+  const toggleSpeedCameras = () => {
+    const newVisibility = !showSpeedCameras;
+    setShowSpeedCameras(newVisibility);
+    
+    speedCameraMarkers.forEach(marker => {
+      if (newVisibility) {
+        marker.addTo(mapRef.current);
+      } else {
+        marker.remove();
+      }
+    });
+  };
+
+  const toggleSpeedLimits = () => {
+    const newVisibility = !showSpeedLimits;
+    setShowSpeedLimits(newVisibility);
+    
+    if (mapRef.current && mapRef.current.getLayer('speed-limits-layer')) {
+      mapRef.current.setLayoutProperty(
+        'speed-limits-layer',
+        'visibility',
+        newVisibility ? 'visible' : 'none'
+      );
+    }
+    
+    speedLimitMarkers.forEach(marker => {
+      if (newVisibility) {
+        marker.addTo(mapRef.current);
+      } else {
+        marker.remove();
+      }
+    });
+  };
+
+  // Add custom styles for speed cameras and speed limits
+  useEffect(() => {
+    const styleSheet = document.createElement("style");
+    styleSheet.textContent = `
+      /* Existing styles... */
+
+      /* Speed Camera Styles */
+      .speed-camera-marker {
+        width: 32px;
+        height: 32px;
+        background-color: rgba(240, 59, 32, 0.8);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-size: 16px;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+      }
+
+      .camera-popup {
+        padding: 10px;
+        font-family: Arial, sans-serif;
+      }
+
+      .camera-popup h4 {
+        margin: 0 0 5px 0;
+        color: #f03b20;
+        font-size: 14px;
+      }
+
+      .camera-popup p {
+        margin: 2px 0;
+        font-size: 12px;
+        color: #333;
+      }
+
+      /* Speed Limit Styles */
+      .speed-limit-marker {
+        width: 40px;
+        height: 40px;
+      }
+
+      .speed-limit-sign {
+        background-color: white;
+        border: 3px solid red;
+        border-radius: 50%;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        color: black;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+      }
+
+      .speed-popup {
+        padding: 10px;
+        font-family: Arial, sans-serif;
+      }
+
+      .speed-popup h4 {
+        margin: 0;
+        font-size: 14px;
+        color: #333;
+      }
+
+      /* Controls Panel */
+      .controls-panel {
+        position: absolute;
+        top: 100px;
+        right: 24px;
+        width: 240px;
+        background: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        padding: 16px;
+        z-index: 1000;
+      }
+
+      .controls-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #1f2937;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid #e5e7eb;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .control-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin: 8px 0;
+      }
+
+      .control-label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+        color: #1f2937;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 40px;
+        height: 20px;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .toggle-slider {
+        position: absolute;
+        cursor: pointer;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background-color: #ccc;
+        transition: .4s;
+        border-radius: 20px;
+      }
+
+      .toggle-slider:before {
+        position: absolute;
+        content: "";
+        height: 16px;
+        width: 16px;
+        left: 2px;
+        bottom: 2px;
+        background-color: white;
+        transition: .4s;
+        border-radius: 50%;
+      }
+
+      input:checked + .toggle-slider {
+        background-color: #2563eb;
+      }
+
+      input:checked + .toggle-slider:before {
+        transform: translateX(20px);
+      }
+
+      /* Route Legend */
+      .route-legend {
+        position: absolute;
+        bottom: 24px;
+        left: 24px;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 12px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        z-index: 1000;
+      }
+
+      .legend-title {
+        font-weight: 600;
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        margin-bottom: 4px;
+      }
+
+      .legend-color {
+        width: 20px;
+        height: 5px;
+        margin-right: 8px;
+      }
+
+      .legend-label {
+        font-size: 12px;
+      }
+    `;
+    document.head.appendChild(styleSheet);
+
+    return () => {
+      styleSheet.remove();
+    };
+  }, []);
 
   const toggleTrafficLayer = () => {
     if (mapRef.current) {
@@ -272,80 +833,6 @@ const MapComponent = () => {
     } catch (error) {
       console.error('Error fetching traffic data:', error);
       return null;
-    }
-  };
-
-  const handleRouteUpdate = async (event) => {
-    if (!directionsRef.current) return;
-
-    const origin = directionsRef.current.getOrigin();
-    const destination = directionsRef.current.getDestination();
-
-    setError(null);
-
-    if (!origin || !origin.geometry || !origin.geometry.coordinates) {
-      setError('Please enter a valid start location');
-      return;
-    }
-
-    if (!destination || !destination.geometry || !destination.geometry.coordinates) {
-      setError('Please enter a valid destination');
-      return;
-    }
-
-    // Store coordinates
-    setStartCoords(origin.geometry.coordinates);
-    setEndCoords(destination.geometry.coordinates);
-
-    // Update weather for start and end points
-    const startWeatherData = await fetchWeatherData(
-      origin.geometry.coordinates[1],
-      origin.geometry.coordinates[0]
-    );
-    setStartWeather(startWeatherData);
-
-    const endWeatherData = await fetchWeatherData(
-      destination.geometry.coordinates[1],
-      destination.geometry.coordinates[0]
-    );
-    setEndWeather(endWeatherData);
-
-    // Get route data from the event
-    if (event && event.route && event.route[0]) {
-      const steps = event.route[0].legs[0].steps;
-      const sampledPoints = steps.filter((_, index) => index % 5 === 0);
-      const routeGeometry = event.route[0].geometry;
-      fetchEmergencyServices(routeGeometry);
-
-      const cities = await Promise.all(
-        sampledPoints.map(async (step) => {
-          const [lng, lat] = step.maneuver.location;
-          const cityName = await fetchCityName(lat, lng);
-          const weather = await fetchWeatherData(lat, lng);
-          return {
-            cityName,
-            weather,
-            coordinates: [lng, lat]
-          };
-        })
-      );
-
-      const uniqueCities = cities.filter((city, index, self) =>
-        index === self.findIndex((c) => c.cityName === city.cityName)
-      );
-      setRouteCities(uniqueCities);
-
-      // Collect weather data for analysis
-      const weatherPoints = await Promise.all(
-        sampledPoints.map(step => {
-          const [lng, lat] = step.maneuver.location;
-          return fetchWeatherData(lat, lng);
-        })
-      );
-
-      // Generate route recommendation using only weather data
-      const recommendation = analyzeRouteConditions(weatherPoints);
-      setRouteRecommendation(recommendation);
     }
   };
 
@@ -1254,6 +1741,68 @@ const MapComponent = () => {
                 <span className="detail-text">{detail.text}</span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+      {/* Controls Panel for Speed Cameras and Speed Limits */}
+      <div className="controls-panel">
+        <div className="controls-title">
+          <FaRoad />
+          Traffic Safety Controls
+        </div>
+        <div className="control-item">
+          <span className="control-label">
+            <FaCamera color="#f03b20" />
+            Speed Cameras
+          </span>
+          <label className="toggle-switch">
+            <input 
+              type="checkbox" 
+              checked={showSpeedCameras} 
+              onChange={toggleSpeedCameras}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+        <div className="control-item">
+          <span className="control-label">
+            <FaRoad color="#2563eb" />
+            Speed Limits
+          </span>
+          <label className="toggle-switch">
+            <input 
+              type="checkbox" 
+              checked={showSpeedLimits} 
+              onChange={toggleSpeedLimits}
+            />
+            <span className="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      
+      {/* Speed Limit Legend */}
+      {showSpeedLimits && (
+        <div className="route-legend">
+          <div className="legend-title">Speed Limit Colors</div>
+          <div className="legend-item">
+            <div className="legend-color" style={{ backgroundColor: '#4CAF50' }}></div>
+            <div className="legend-label">≤ 30 km/h (Residential/School Zones)</div>
+          </div>
+          <div className="legend-item">
+            <div className="legend-color" style={{ backgroundColor: '#FFA000' }}></div>
+            <div className="legend-label">31-50 km/h (Urban Roads)</div>
+          </div>
+          <div className="legend-item">
+            <div className="legend-color" style={{ backgroundColor: '#FF5252' }}></div>
+            <div className="legend-label">51-70 km/h (Main Roads)</div>
+          </div>
+          <div className="legend-item">
+            <div className="legend-color" style={{ backgroundColor: '#9C27B0' }}></div>
+            <div className="legend-label">70+ km/h (Highways)</div>
+          </div>
+          <div className="legend-item">
+            <div className="legend-color" style={{ backgroundColor: '#888888' }}></div>
+            <div className="legend-label">Unknown Speed Limit</div>
           </div>
         </div>
       )}
